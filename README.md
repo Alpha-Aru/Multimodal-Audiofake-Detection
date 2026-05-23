@@ -19,8 +19,6 @@ Datasets used by the research scripts:
 - ASVspoof 2019: <https://www.kaggle.com/datasets/awsaf49/asvpoof-2019-dataset>
 - WaveFake: <https://www.kaggle.com/datasets/andreadiubaldo/wavefake-test>
 
-`LibriSVoC` is still referenced by the benchmark script, but I did not find a clean public Kaggle source that matches the old path assumptions, so that one is still manual.
-
 ## Model Summary
 
 The detector works on 1-second audio chunks at 16 kHz. For each chunk, the code builds three inputs:
