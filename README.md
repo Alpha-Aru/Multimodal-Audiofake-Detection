@@ -10,7 +10,6 @@ This repository contains the code for a tri-modal audio deepfake detector that c
 
 Paper: <https://docs.google.com/document/d/1IriyA82F-8KW9teJCRSQbmWc7ReWa2HsL1Vw6Q2WPkM/edit?usp=sharing>  
 Model: <https://huggingface.co/skorps007/trispectra>  
-Colab demo: <https://colab.research.google.com/drive/1Kvj7d5FSoA6zPCmxAl8YbS3kNEdqIsZT?usp=sharing>
 
 Datasets used by the research scripts:
 
