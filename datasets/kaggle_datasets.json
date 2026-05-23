@@ -1,0 +1,45 @@
+[
+  {
+    "name": "FoR",
+    "slug": "mohammedabdeldayem/the-fake-or-real-dataset",
+    "url": "https://www.kaggle.com/datasets/mohammedabdeldayem/the-fake-or-real-dataset",
+    "local_dir": "datasets/raw/the-fake-or-real-dataset",
+    "used_by": [
+      "scripts/train_research.py",
+      "scripts/cache_features.py",
+      "scripts/benchmark_research.py"
+    ],
+    "notes": "Includes for-original, for-norm, for-2sec, and for-rerec."
+  },
+  {
+    "name": "In The Wild",
+    "slug": "bhaveshkumars/release-in-the-wild",
+    "url": "https://www.kaggle.com/datasets/bhaveshkumars/release-in-the-wild",
+    "local_dir": "datasets/raw/release-in-the-wild",
+    "used_by": [
+      "scripts/train_research.py"
+    ],
+    "notes": "Matches the release_in_the_wild folder naming used by the training script."
+  },
+  {
+    "name": "ASVspoof 2019",
+    "slug": "awsaf49/asvpoof-2019-dataset",
+    "url": "https://www.kaggle.com/datasets/awsaf49/asvpoof-2019-dataset",
+    "local_dir": "datasets/raw/asvpoof-2019-dataset",
+    "used_by": [
+      "scripts/train_research.py",
+      "scripts/benchmark_research.py"
+    ],
+    "notes": "Logical access and physical access partitions. The current scripts use the LA partition."
+  },
+  {
+    "name": "WaveFake",
+    "slug": "andreadiubaldo/wavefake-test",
+    "url": "https://www.kaggle.com/datasets/andreadiubaldo/wavefake-test",
+    "local_dir": "datasets/raw/wavefake-test",
+    "used_by": [
+      "scripts/benchmark_research.py"
+    ],
+    "notes": "Contains generated_audio with the directory structure expected by the benchmark script."
+  }
+]

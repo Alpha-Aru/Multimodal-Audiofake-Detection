@@ -1,3 +1,5 @@
+import argparse
+import sys
 import os
 import torch
 import torch.nn.functional as F
@@ -8,6 +10,14 @@ import torchaudio
 import numpy as np
 import pywt
 import json
+
+ROOT = Path(__file__).resolve().parents[1]
+SRC_DIR = ROOT / "src"
+if str(SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(SRC_DIR))
+
+from trispectra.features import load_audio_mono
+from trispectra.research_paths import DEFAULT_TRAINING_OUTPUT_DIR, resolve_for_root
 
 class CachedAudioDataset(Dataset):
     def __init__(self, cache_dir, chunk_size=16000, augment=False):
@@ -85,12 +95,7 @@ def cache_features(data_dir, oc_dir, sample_rate=16000, chunk_size=16000, overwr
 
             # Load audio with torchaudio
             try:
-                waveform, sr_orig = torchaudio.load(str(audio_path))
-                if sr_orig != sample_rate:
-                    resampler = torchaudio.transforms.Resample(sr_orig, sample_rate)
-                    waveform = resampler(waveform)
-                waveform = waveform.mean(dim=0) 
-                waveform = waveform.numpy()
+                waveform = load_audio_mono(str(audio_path), sample_rate=sample_rate).numpy()
 
                 if len(waveform) < chunk_size:
                     pad_width = chunk_size - len(waveform)
@@ -188,12 +193,40 @@ def prep_cachedata(cache_dir, test_size=0.2, val_size=0.1, augment_train=True):
     return train_ds, val_ds, test_ds
 
 
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Cache TriSpectra features for a local dataset split.")
+    parser.add_argument(
+        "--data-dir",
+        default=str(resolve_for_root() / "for-2sec" / "for-2seconds" / "training"),
+        help="Directory containing `real/` and `fake/` subfolders.",
+    )
+    parser.add_argument(
+        "--cache-dir",
+        default=str(DEFAULT_TRAINING_OUTPUT_DIR / "cached_features" / "training"),
+        help="Directory where cached feature files will be written.",
+    )
+    parser.add_argument("--sample-rate", type=int, default=16000)
+    parser.add_argument("--chunk-size", type=int, default=16000)
+    parser.add_argument("--overwrite", action="store_true")
+    args = parser.parse_args()
+
+    data_dir = Path(args.data_dir)
+    cache_dir = Path(args.cache_dir)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+
+    cache_features(
+        data_dir,
+        cache_dir,
+        sample_rate=args.sample_rate,
+        chunk_size=args.chunk_size,
+        overwrite=args.overwrite,
+    )
+
+    train_ds, val_ds, test_ds = prep_cachedata(cache_dir)
+    print(
+        f"Prepared cached datasets: train={len(train_ds)}, val={len(val_ds)}, test={len(test_ds)}"
+    )
+
+
 if __name__ == '__main__':
-    data_dir = "/kaggle/input/the-fake-or-real-dataset/for-2sec/for-2seconds/training"
-    cache_dir = "/kaggle/working/cached_features/training"
-
-    Path(cache_dir).mkdir(parents=True, exist_ok=True)
-
-    cache_features(data_dir, cache_dir, sample_rate=16000, chunk_size=16000, overwrite=False)
-
-    train_ds, val_ds, test_ds = prep_cachedata("/kaggle/working/cached_features/training")
+    main()

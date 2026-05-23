@@ -1,9 +1,6 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torchaudio
-import numpy as np
-import pywt
 import math
 
 class PatchEmbed(nn.Module):
@@ -220,8 +217,8 @@ class RawCNN(nn.Module):
         for i, res_block in enumerate(self.res_blocks):
             try:
                 x = res_block(x)
-                # Add memory synchronization points
-                if i % 2 == 0:
+                # Keep the legacy sync only when running on CUDA.
+                if i % 2 == 0 and x.is_cuda:
                     torch.cuda.synchronize()
             except Exception as e:
                 print(f"Error in residual block {i}: {e}")

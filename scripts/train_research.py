@@ -1,7 +1,17 @@
+import argparse
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+SRC_DIR = ROOT / "src"
+if str(SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(SRC_DIR))
+
+import os
+os.environ.setdefault("MPLCONFIGDIR", str(ROOT / ".matplotlib"))
 
 import random
 import numpy as np
-from pathlib import Path
 from collections import defaultdict
 import torch
 import torch.nn as nn
@@ -13,12 +23,18 @@ from sklearn.metrics import (accuracy_score, roc_auc_score,
                            classification_report, roc_curve)
 import pywt
 import json
-from model import TBranchDetector
+from trispectra.modeling import TBranchDetector
+from trispectra.features import load_audio_mono
+from trispectra.research_paths import (
+    DEFAULT_TRAINING_OUTPUT_DIR,
+    resolve_asvspoof_root,
+    resolve_for_root,
+    resolve_in_the_wild_root,
+)
 import matplotlib.pyplot as plt
 from sklearn.model_selection import train_test_split
 import gc
 import torch.nn.functional as F
-import os
 import torch.backends.cudnn
 import hashlib
 import torch.multiprocessing as mp
@@ -29,7 +45,10 @@ os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
 os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
 torch.backends.cudnn.benchmark = False 
 torch.backends.cudnn.deterministic = True
-mp.set_start_method('spawn', force=True)
+try:
+    mp.set_start_method('spawn', force=True)
+except RuntimeError:
+    pass
 
 # Configuration
 CONFIG = {
@@ -175,14 +194,7 @@ class CachedAudioDataset(Dataset):
                 print(f"Error loading cached file {cache_path}: {e}")
 
         try:
-            waveform, sr = torchaudio.load(path)
-            if sr != CONFIG["sample_rate"]:
-                waveform = torchaudio.functional.resample(waveform, sr, CONFIG["sample_rate"])
-
-            if waveform.size(0) > 1:
-                waveform = waveform.mean(dim=0, keepdim=True)
-
-            waveform = waveform.squeeze()
+            waveform = load_audio_mono(path, sample_rate=CONFIG["sample_rate"])
 
             target_len = CONFIG["sample_rate"]
             if waveform.size(0) < target_len:
@@ -252,10 +264,7 @@ class AudioDataset(Dataset):
         path, label = self.files[idx]
         try:
             if isinstance(path, (str, Path)):
-                audio, sr = torchaudio.load(path)
-                if sr != CONFIG["sample_rate"]:
-                    resampler = T.Resample(orig_freq=sr, new_freq=CONFIG["sample_rate"])
-                    audio = resampler(audio)
+                audio = load_audio_mono(str(path), sample_rate=CONFIG["sample_rate"])
             else: 
                 audio, sr = torchaudio.load(path["array"])
                 if sr != CONFIG["sample_rate"]:
@@ -306,8 +315,8 @@ class AudioDataset(Dataset):
             
         return torch.tensor(np.clip(audio_np, -1.0, 1.0), dtype=torch.float32)
 
-def load_fakeorreal():
-    base_path = Path("/kaggle/input/the-fake-or-real-dataset")
+def load_fakeorreal(base_path: str | Path):
+    base_path = Path(base_path)
     subdirs = ["for-2sec/for-2seconds", "for-rerec"]
     files = []
 
@@ -320,25 +329,25 @@ def load_fakeorreal():
 
     return files
 
-def load_inthewild(split_ratio=0.7):
-    base_path = "/kaggle/input/in-the-wild-audio-deepfake/release_in_the_wild"
-    realf = list(Path(f"{base_path}/real").glob("*.wav"))
-    fakef = list(Path(f"{base_path}/fake").glob("*.wav"))
+def load_inthewild(base_path: str | Path, split_ratio=0.7):
+    base_path = Path(base_path)
+    realf = list((base_path / "real").glob("*.wav"))
+    fakef = list((base_path / "fake").glob("*.wav"))
     
     train_real, _ = train_test_split(realf, train_size=split_ratio)
     train_fake, _ = train_test_split(fakef, train_size=split_ratio)
     
     return [(str(f), 0) for f in train_real] + [(str(f), 1) for f in train_fake]
 
-def load_asvspoof():
-    base_path = "/kaggle/input/asvspoof-2019/LA"
-    protocol_path = f"{base_path}/ASVspoof2019_LA_cm_protocols/ASVspoof2019.LA.cm.train.trn.txt"
-    flac_dir = Path(f"{base_path}/ASVspoof2019_LA_train/flac")
+def load_asvspoof(base_path: str | Path):
+    base_path = Path(base_path)
+    protocol_path = base_path / "ASVspoof2019_LA_cm_protocols" / "ASVspoof2019.LA.cm.train.trn.txt"
+    flac_dir = base_path / "ASVspoof2019_LA_train" / "flac"
 
     print(f"Checking protocol at: {protocol_path}")
     print(f"Checking FLAC files at: {flac_dir}")
     
-    
+
     file_labels = {}
 
     with open(protocol_path, 'r') as f:
@@ -366,17 +375,16 @@ def load_asvspoof():
     return files
 
 
-def get_valset():
+def get_valset(base_path: str | Path):
     # Get FOR validation set
-    base_path = "/kaggle/input/the-fake-or-real-dataset"
+    base_path = Path(base_path)
     val_data = []
     val_paths = [
-        f"{base_path}/for-2sec/for-2seconds/validation",
-        f"{base_path}/for-rerec/for-rerecorded/validation"
+        base_path / "for-2sec" / "for-2seconds" / "validation",
+        base_path / "for-rerec" / "for-rerecorded" / "validation",
     ]
 
     for val_path in val_paths:
-        val_path = Path(val_path)
         if val_path.exists():
             real_files = list((val_path / "real").glob("*.wav"))
             fake_files = list((val_path / "fake").glob("*.wav"))
@@ -409,12 +417,34 @@ class HybridLoss(nn.Module):
         
         return 0.5 * ce_loss + 0.5 * focal_loss
 
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Train the original TriSpectra research model locally.")
+    parser.add_argument("--data-root", default=str(ROOT / "datasets" / "raw"))
+    parser.add_argument("--for-root", default=None)
+    parser.add_argument("--in-the-wild-root", default=None)
+    parser.add_argument("--asvspoof-root", default=None)
+    parser.add_argument("--output-dir", default=str(DEFAULT_TRAINING_OUTPUT_DIR))
+    parser.add_argument("--batch-size", type=int, default=CONFIG["batch_size"])
+    parser.add_argument("--num-epochs", type=int, default=CONFIG["num_epochs"])
+    parser.add_argument("--lr", type=float, default=CONFIG["lr"])
+    parser.add_argument("--max-train-samples", type=int, default=None)
+    parser.add_argument("--max-val-samples", type=int, default=None)
+    return parser.parse_args()
+
+
+def maybe_trim(samples, max_samples: int | None):
+    if max_samples is None:
+        return samples
+    return samples[:max_samples]
+
 def train_epoch(model, loader, criterion, optimizer, device):
     print("Entered train epoch")
     model.train()
     total_loss = 0.0
     optimizer.zero_grad()
-    scaler = GradScaler('cuda')
+    use_cuda = device.type == "cuda"
+    scaler = GradScaler(device.type, enabled=use_cuda)
     
     print(f"Start iterating over {len(loader)} batches")
 
@@ -441,9 +471,10 @@ def train_epoch(model, loader, criterion, optimizer, device):
             elif x_wav.dim() == 5:  # [B, 1, 1, 64, 128] 
                 x_wav = x_wav.squeeze(2)  # [B, 1, 64, 128]
             
-            torch.cuda.synchronize()
+            if use_cuda:
+                torch.cuda.synchronize()
             # Forward pass with autocast
-            with autocast('cuda'):
+            with autocast(device_type=device.type, enabled=use_cuda):
                 logits = model(x_raw, x_fft, x_wav)
                 loss = criterion(logits, y) / CONFIG["accumulation_steps"]
             
@@ -461,7 +492,7 @@ def train_epoch(model, loader, criterion, optimizer, device):
             
             # Memory cleanup
             del logits, loss, x_raw, x_fft, x_wav, y
-            if i % 10 == 0:
+            if i % 10 == 0 and use_cuda:
                 torch.cuda.empty_cache()
                 gc.collect()
 
@@ -470,7 +501,8 @@ def train_epoch(model, loader, criterion, optimizer, device):
             print(f"Error in batch {i}: {e}")
             print(f"Shapes - raw: {x_raw.shape}, fft: {x_fft.shape}, wav: {x_wav.shape}")
             optimizer.zero_grad()
-            torch.cuda.empty_cache()
+            if use_cuda:
+                torch.cuda.empty_cache()
             continue
     
     return total_loss / len(loader.dataset)
@@ -479,6 +511,7 @@ def evaluate(model, loader, criterion, device):
     model.eval()
     y_true, y_prob = [], []
     total_loss = 0.0
+    use_cuda = device.type == "cuda"
     
     with torch.no_grad():
         for x_raw, x_fft, x_wav, y in loader:
@@ -504,7 +537,7 @@ def evaluate(model, loader, criterion, device):
                 x_wav = x_wav.to(device, non_blocking=True)
                 y = y.to(device, non_blocking=True)
                 
-                with autocast('cuda'):
+                with autocast(device_type=device.type, enabled=use_cuda):
                     logits = model(x_raw, x_fft, x_wav)
                     loss = criterion(logits, y)
                     
@@ -586,8 +619,17 @@ def collate_fn(batch):
         raise
 
 def main():
+    args = parse_args()
+    CONFIG["batch_size"] = args.batch_size
+    CONFIG["num_epochs"] = args.num_epochs
+    CONFIG["lr"] = args.lr
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
+    output_dir = Path(args.output_dir).expanduser().resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    train_cache_dir = output_dir / "train_cache"
+    val_cache_dir = output_dir / "val_cache"
     
     torch.manual_seed(42)
     np.random.seed(42)
@@ -599,8 +641,46 @@ def main():
     val_losses = []
     
     print("Loading datasets")
-    train_data = load_fakeorreal() + load_inthewild(CONFIG["data_splits"]["in_the_wild"]) + load_asvspoof()
-    val_data = get_valset()
+    train_data = []
+    val_data = []
+
+    for_root = resolve_for_root(args.data_root, args.for_root)
+    if for_root.exists():
+        train_data.extend(load_fakeorreal(for_root))
+        val_data.extend(get_valset(for_root))
+    else:
+        print(f"Skipping FoR dataset; not found at {for_root}")
+
+    in_the_wild_root = resolve_in_the_wild_root(args.data_root, args.in_the_wild_root)
+    if in_the_wild_root.exists():
+        train_data.extend(load_inthewild(in_the_wild_root, CONFIG["data_splits"]["in_the_wild"]))
+    else:
+        print(f"Skipping In The Wild dataset; not found at {in_the_wild_root}")
+
+    asvspoof_root = resolve_asvspoof_root(args.data_root, args.asvspoof_root)
+    if asvspoof_root.exists():
+        train_data.extend(load_asvspoof(asvspoof_root))
+    else:
+        print(f"Skipping ASVspoof dataset; not found at {asvspoof_root}")
+
+    train_data = maybe_trim(train_data, args.max_train_samples)
+    val_data = maybe_trim(val_data, args.max_val_samples)
+
+    if not train_data:
+        raise FileNotFoundError(
+            "No training datasets were found. Download the datasets into datasets/raw/ or pass "
+            "--for-root / --in-the-wild-root / --asvspoof-root explicitly."
+        )
+
+    if not val_data:
+        print("FoR validation set not found; creating a validation split from the training data.")
+        labels = [label for _, label in train_data]
+        train_data, val_data = train_test_split(
+            train_data,
+            test_size=0.1,
+            random_state=42,
+            stratify=labels,
+        )
     
     # Count classes for weighting
     class_counts = defaultdict(int)
@@ -612,8 +692,8 @@ def main():
         class_counts[1]/total 
     ], device=device)
     
-    train_ds = CachedAudioDataset(train_data, cache_dir="train_cache", augment=True)
-    val_ds = CachedAudioDataset(val_data, cache_dir="val_cache", augment=False)
+    train_ds = CachedAudioDataset(train_data, cache_dir=train_cache_dir, augment=True)
+    val_ds = CachedAudioDataset(val_data, cache_dir=val_cache_dir, augment=False)
      
     print(f"Loaded {len(train_ds)} training samples, {len(val_ds)} validation samples")
     sample = train_ds[0]
@@ -627,11 +707,11 @@ def main():
         batch_size=CONFIG["batch_size"],
         shuffle=True,
         num_workers=0,
-        pin_memory=True,
+        pin_memory=device.type == "cuda",
         # multiprocessing_context='spawn',
         # persistent_workers=True,
         collate_fn=collate_fn,
-        drop_last=True
+        drop_last=len(train_ds) >= CONFIG["batch_size"]
     )
     val_loader = DataLoader(
         val_ds,
@@ -640,7 +720,7 @@ def main():
         num_workers=0,
         #multiprocessing_context='spawn',
         collate_fn=collate_fn,
-        drop_last=True
+        drop_last=len(val_ds) >= CONFIG["batch_size"]
     )
 
     model = TBranchDetector(
@@ -691,7 +771,7 @@ def main():
         steps_per_epoch=len(train_loader),
         epochs=CONFIG["num_epochs"],
         pct_start=0.3
-    )
+    ) if CONFIG["num_epochs"] > 0 else None
 
     print("Starting training loop")
     print(f"Training loader length: {len(train_loader)}")
@@ -724,6 +804,9 @@ def main():
         print(f"ERROR in model forward pass: {e}")
         import traceback
         traceback.print_exc()
+    if CONFIG["num_epochs"] <= 0:
+        print("Dry run completed successfully; skipping training because --num-epochs <= 0.")
+        return
     print("Entering training loop")
     # Training
     best_auc = 0.0
@@ -733,7 +816,8 @@ def main():
         train_loss = train_epoch(model, train_loader, criterion, optimizer, device)
         val_metrics = evaluate(model, val_loader, criterion, device)
         val_losses.append(val_metrics["loss"])
-        scheduler.step()
+        if scheduler is not None:
+            scheduler.step()
         
         print(f"\nEpoch {epoch}/{CONFIG['num_epochs']}")
         print(f"Train Loss: {train_loss:.4f} | LR: {optimizer.param_groups[0]['lr']:.2e}")
@@ -745,21 +829,25 @@ def main():
         # Save best model
         if val_metrics["auc"] > best_auc:
             best_auc = val_metrics["auc"]
-            torch.save(model.state_dict(), "best_model.pth")
+            best_model_path = output_dir / "best_model.pth"
+            torch.save(model.state_dict(), best_model_path)
             patience_counter = 0
             print("**New best model saved**")
-            torch.save(model.state_dict(), "/kaggle/working/best_model.pth")
         else:
             patience_counter += 1
             if patience_counter >= CONFIG["patience"]:
                 print(f"Early stopping at epoch {epoch}")
                 break
         
-        torch.cuda.empty_cache()
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
         gc.collect()
     
     # Final evaluation
-    model.load_state_dict(torch.load("best_model.pth"))
+    best_model_path = output_dir / "best_model.pth"
+    if not best_model_path.exists():
+        torch.save(model.state_dict(), best_model_path)
+    model.load_state_dict(torch.load(best_model_path, map_location=device))
     final_metrics = evaluate(model, val_loader, criterion, device)
     
     print("\nFinal Evaluation")
@@ -773,7 +861,7 @@ def main():
         "Classification Report": final_metrics["report"]
     }
 
-    with open("/kaggle/working/metrics.json", "w") as f:
+    with open(output_dir / "metrics.json", "w") as f:
         json.dump(metrics, f, indent=2)
 
     # Plot ROC
@@ -784,8 +872,7 @@ def main():
     plt.ylabel('True Positive Rate')
     plt.title('ROC Curve')
     plt.legend()
-    plt.savefig('roc_curve.png')
-    plt.savefig("/kaggle/working/roc_curve.png")
+    plt.savefig(output_dir / "roc_curve.png")
     
     # Val loss plot
     plt.figure(figsize=(8, 6))
@@ -794,8 +881,7 @@ def main():
     plt.ylabel("Validation Loss")
     plt.title("Validation Loss Over Epochs")
     plt.grid(True)
-    plt.savefig("val_loss_curve.png")
-    plt.savefig("/kaggle/working/val_loss_curve.png")
+    plt.savefig(output_dir / "val_loss_curve.png")
 
 
 if __name__ == "__main__":

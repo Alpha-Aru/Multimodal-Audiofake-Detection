@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "trispectra-audiofake-detection"
+version = "0.1.0"
+description = "TriSpectra-based audio deepfake detection with a Gradio web app."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "gradio>=4.44.0",
+  "huggingface_hub>=0.24.0",
+  "PyWavelets>=1.6.0",
+  "safetensors>=0.4.5",
+  "soundfile>=0.12.1",
+  "torch>=2.2.0",
+  "torchaudio>=2.2.0",
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]

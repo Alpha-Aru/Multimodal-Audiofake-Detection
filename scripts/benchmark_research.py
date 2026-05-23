@@ -1,3 +1,15 @@
+import argparse
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+SRC_DIR = ROOT / "src"
+if str(SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(SRC_DIR))
+
+import os
+os.environ.setdefault("MPLCONFIGDIR", str(ROOT / ".matplotlib"))
+
 import torch
 import numpy as np
 import librosa
@@ -7,29 +19,37 @@ from sklearn.metrics import (accuracy_score, f1_score, roc_auc_score,
                            precision_score, recall_score, classification_report, roc_curve)
 from scipy.optimize import brentq
 from scipy.interpolate import interp1d
-from pathlib import Path
-from model import TBranchDetector
+from trispectra.modeling import TBranchDetector
+from trispectra.research_paths import (
+    DEFAULT_BENCHMARK_OUTPUT_DIR,
+    resolve_asvspoof_root,
+    resolve_for_root,
+    resolve_librisvoc_root,
+    resolve_training_checkpoint_path,
+    resolve_wavefake_root,
+)
 from tqdm import tqdm
 import json
 import matplotlib.pyplot as plt
 from datetime import datetime
-import os
 import pandas as pd
 import torchaudio.transforms as T
 import torch.nn.functional as F
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-os.makedirs("/kaggle/working/benchmark", exist_ok=True)
+model: torch.nn.Module | None = None
+OUTPUT_DIR = DEFAULT_BENCHMARK_OUTPUT_DIR
 
-base_model = TBranchDetector().to(device)
-base_model.load_state_dict(
-    torch.load(
-        "/kaggle/input/wavspectr/pytorch/default/1/best_model.pth",
-        map_location=device
-    )
-)
-model = torch.nn.DataParallel(base_model)
-model.eval()
+
+def load_model(model_path: str | Path) -> torch.nn.Module:
+    checkpoint_path = Path(model_path)
+    base_model = TBranchDetector().to(device)
+    base_model.load_state_dict(torch.load(checkpoint_path, map_location=device))
+    loaded_model: torch.nn.Module = base_model
+    if torch.cuda.is_available() and torch.cuda.device_count() > 1:
+        loaded_model = torch.nn.DataParallel(base_model)
+    loaded_model.eval()
+    return loaded_model
 
 def calculate_eer(y_true, y_prob):
     fpr, tpr, thresholds = roc_curve(y_true, y_prob)
@@ -83,8 +103,8 @@ class AudioDataset(Dataset):
                 -1
             )
 
-def load_for_original(max_samples=None):
-    base = Path("/kaggle/input/the-fake-or-real-dataset/for-original/for-original/testing")
+def load_for_original(base: str | Path, max_samples=None):
+    base = Path(base) / "for-original" / "for-original" / "testing"
     data = []
     for label, name in [(0, 'real'), (1, 'fake')]:
         files = list((base / name).glob("*.wav"))
@@ -94,10 +114,10 @@ def load_for_original(max_samples=None):
     print(f"FOR-Original: Loaded {len(data)} samples")
     return data
 
-def load_asvspoof():
-    base_path = "/kaggle/input/asvspoof-2019eval/LA"
-    protocol_path = f"{base_path}/ASVspoof2019_LA_cm_protocols/ASVspoof2019.LA.cm.eval.trl.txt"
-    flac_dir = Path(f"{base_path}/ASVspoof2019_LA_eval/flac")
+def load_asvspoof(base_path: str | Path):
+    base_path = Path(base_path)
+    protocol_path = base_path / "ASVspoof2019_LA_cm_protocols" / "ASVspoof2019.LA.cm.eval.trl.txt"
+    flac_dir = base_path / "ASVspoof2019_LA_eval" / "flac"
 
     print(f"Checking protocol at: {protocol_path}")
     print(f"Checking FLAC files at: {flac_dir}")
@@ -128,8 +148,8 @@ def load_asvspoof():
         raise ValueError("No valid files found - check protocol/flac matching")
     return files
 
-def load_librisvoc():
-    base_path = Path("/kaggle/input/librisvoc/test-clean")
+def load_librisvoc(base_path: str | Path):
+    base_path = Path(base_path)
     
     if not base_path.exists():
         raise ValueError(f"LibriSVoC dataset not found at: {base_path}")
@@ -156,8 +176,8 @@ def load_librisvoc():
     print(f"LibriSVoC: Total loaded {len(files)} samples")
     return files
 
-def load_wavefake():
-    base_path = Path("/kaggle/input/wavefake-dataset/generated_audio")
+def load_wavefake(base_path: str | Path):
+    base_path = Path(base_path)
     
     files = []
     
@@ -193,6 +213,8 @@ def load_wavefake():
     return files
 
 def evaluate(dataloader, name="Dataset"):
+    if model is None:
+        raise RuntimeError("Benchmark model has not been loaded.")
     y_true, y_prob = [], []
     
     for x_raw, x_fft, x_wav, labels in tqdm(dataloader, desc=f"Evaluating {name}"):
@@ -258,37 +280,62 @@ def evaluate(dataloader, name="Dataset"):
     plt.ylabel('True Positive Rate')
     plt.title(f'ROC Curve - {name}')
     plt.legend(loc='lower right')
-    roc_path = f"/kaggle/working/benchmark/roc_{name.lower().replace('-', '_').replace(' ', '_')}.png"
+    roc_path = OUTPUT_DIR / f"roc_{name.lower().replace('-', '_').replace(' ', '_')}.png"
     plt.savefig(roc_path)
     plt.close()
-    metrics["roc_curve_path"] = roc_path
+    metrics["roc_curve_path"] = str(roc_path)
     
     return metrics
 
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Benchmark a local TriSpectra checkpoint on available datasets.")
+    parser.add_argument("--data-root", default=str(ROOT / "datasets" / "raw"))
+    parser.add_argument("--for-root", default=None)
+    parser.add_argument("--asvspoof-root", default=None)
+    parser.add_argument("--librisvoc-root", default=None)
+    parser.add_argument("--wavefake-root", default=None)
+    parser.add_argument("--model-path", default=str(resolve_training_checkpoint_path()))
+    parser.add_argument("--output-dir", default=str(DEFAULT_BENCHMARK_OUTPUT_DIR))
+    parser.add_argument("--max-for-original-samples", type=int, default=5000)
+    return parser.parse_args()
+
 if __name__ == "__main__":
-    torch.cuda.empty_cache()
-    
-    os.makedirs("/kaggle/working/benchmark", exist_ok=True)
+    args = parse_args()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+    OUTPUT_DIR = Path(args.output_dir).expanduser().resolve()
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    model = load_model(args.model_path)
     
     datasets = {}
     
+    for_root = resolve_for_root(args.data_root, args.for_root)
     try:
-        datasets["FOR-Original"] = load_for_original(max_samples=5000)
+        if for_root.exists():
+            datasets["FOR-Original"] = load_for_original(for_root, max_samples=args.max_for_original_samples)
     except Exception as e:
         print(f"Failed to load FOR-Original: {e}")
     
+    asvspoof_root = resolve_asvspoof_root(args.data_root, args.asvspoof_root)
     try:
-        datasets["ASVspoof-2019"] = load_asvspoof()
+        if asvspoof_root.exists():
+            datasets["ASVspoof-2019"] = load_asvspoof(asvspoof_root)
     except Exception as e:
         print(f"Failed to load ASVspoof-2019: {e}")
     
+    librisvoc_root = resolve_librisvoc_root(args.data_root, args.librisvoc_root)
     try:
-        datasets["LibriSVoC"] = load_librisvoc()
+        if librisvoc_root.exists():
+            datasets["LibriSVoC"] = load_librisvoc(librisvoc_root)
     except Exception as e:
         print(f"Failed to load LibriSVoC: {e}")
     
+    wavefake_root = resolve_wavefake_root(args.data_root, args.wavefake_root)
     try:
-        datasets["WaveFake"] = load_wavefake()
+        if wavefake_root.exists():
+            datasets["WaveFake"] = load_wavefake(wavefake_root)
     except Exception as e:
         print(f"Failed to load WaveFake: {e}")
     
@@ -310,8 +357,8 @@ if __name__ == "__main__":
         loader = DataLoader(
             AudioDataset(data),
             batch_size=128,
-            num_workers=4,
-            pin_memory=True,
+            num_workers=0,
+            pin_memory=torch.cuda.is_available(),
             collate_fn=lambda x: (
                 torch.stack([item[0] for item in x]),
                 torch.stack([item[1] for item in x]),
@@ -323,7 +370,7 @@ if __name__ == "__main__":
         if metrics:
             all_metrics[name] = metrics
     
-    metrics_path = "/kaggle/working/benchmark/metrics.json"
+    metrics_path = OUTPUT_DIR / "metrics.json"
     json_metrics = {}
     for name, metrics in all_metrics.items():
         json_metrics[name] = {k: v for k, v in metrics.items() if k not in ['y_true', 'y_prob']}
@@ -333,7 +380,7 @@ if __name__ == "__main__":
     print(f"\nSaved all metrics to {metrics_path}")
     
     # Summary report
-    report_path = "/kaggle/working/benchmark/summary.txt"
+    report_path = OUTPUT_DIR / "summary.txt"
     with open(report_path, 'w') as f:
         f.write("WavSpecTR Audio Deepfake Benchmark Results\n")
         f.write("="*50 + "\n\n")
@@ -395,9 +442,11 @@ if __name__ == "__main__":
         plt.xticks(x + width*2, datasets_names, rotation=45)
         plt.legend()
         plt.tight_layout()
-        plt.savefig("/kaggle/working/benchmark/comparison.png", dpi=300)
+        comparison_path = OUTPUT_DIR / "comparison.png"
+        plt.savefig(comparison_path, dpi=300)
         plt.close()
-        print("Saved comparison plot to /kaggle/working/benchmark/comparison.png")
+        print(f"Saved comparison plot to {comparison_path}")
     
-    torch.cuda.empty_cache()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
     print("\nBenchmarking complete!")
